@@ -1,0 +1,39 @@
+{
+  "name": "clanker-captcha",
+  "version": "0.1.0",
+  "license": "MIT",
+  "author": {
+    "name": "Jérôme Mahuet",
+    "url": "https://jeromem.dev"
+  },
+  "type": "module",
+  "description": "An experimental CAPTCHA widget designed for pixel-reading agents rather than humans.",
+  "keywords": [
+    "captcha",
+    "agent",
+    "ai",
+    "browser",
+    "fourier",
+    "widget"
+  ],
+  "scripts": {
+    "demo": "node server.js",
+    "check": "node --check server.js && node --check src/clanker-captcha.js && node --check scripts/solve.mjs",
+    "start": "node server.js",
+    "solve": "node scripts/solve.mjs"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "index.html",
+    "server.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./src/clanker-captcha.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
