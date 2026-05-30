@@ -18,13 +18,11 @@
   ],
   "scripts": {
     "demo": "node server.js",
-    "check": "node --check server.js && node --check src/clanker-captcha.js && node --check scripts/solve.mjs",
-    "start": "node server.js",
-    "solve": "node scripts/solve.mjs"
+    "check": "node --check server.js && node --check src/clanker-captcha.js",
+    "start": "node server.js"
   },
   "files": [
     "src",
-    "scripts",
     "index.html",
     "server.js",
     "README.md",

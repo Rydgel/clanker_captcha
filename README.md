@@ -10,7 +10,6 @@ This repository contains:
 
 - A browser widget library: [src/clanker-captcha.js](./src/clanker-captcha.js)
 - A local demo and reference challenge server: [server.js](./server.js)
-- A reference pixel solver: [scripts/solve.mjs](./scripts/solve.mjs)
 - A cyberpunk demo page: [index.html](./index.html)
 
 ## Status
@@ -27,16 +26,6 @@ npm start
 ```
 
 Open [http://127.0.0.1:4173](http://127.0.0.1:4173).
-
-Run the reference solver against the local server:
-
-```sh
-npm run solve
-npm run solve -- --runs 10
-npm run solve -- --naive
-```
-
-The naive mode decodes a single frame and is expected to fail frequently. The fused mode should solve by combining all frames in the frequency domain.
 
 ## Browser Usage
 
@@ -164,16 +153,10 @@ For each challenge, the server:
 5. Injects per-frame phantom carriers and decoys with random phase.
 6. Stores only the expected checksum and expiry server-side.
 
-A correct solver:
-
-1. Parses every frame.
-2. Computes a complex 2D DFT per frame.
-3. Sums the complex spectra before taking magnitude.
-4. Finds the fiducial peaks and reconstructs the hidden lattice.
-5. Reads each strongest interior on-lattice data cell.
-6. Applies the disclosed transform, layout, permutation, and checksum formula.
-7. Finds a nonce satisfying the disclosed SHA-256 leading-zero proof of work.
-8. Submits `challengeId`, `answer`, and `nonce`.
+A compliant agent is expected to solve from rendered frames and the public
+manifest for that live challenge. This public repository intentionally does not
+ship a runnable reference solver: publishing one would encourage agents to read
+the implementation instead of performing the intended pixel-grounded work.
 
 ## Server Notes
 
@@ -196,11 +179,8 @@ Check syntax:
 npm run check
 ```
 
-Run a solve smoke test while the server is running:
-
-```sh
-npm run solve -- --runs 10
-```
+Manual smoke test: start the demo, open the page, solve the displayed challenge,
+and confirm the verification state changes.
 
 ## Repository Layout
 
@@ -209,10 +189,8 @@ npm run solve -- --runs 10
 ├── index.html              # Demo page
 ├── package.json            # ESM package metadata and scripts
 ├── server.js               # Local challenge/verify/static server
-├── src/
-│   └── clanker-captcha.js  # Browser widget library
-└── scripts/
-    └── solve.mjs           # Reference solver
+└── src/
+    └── clanker-captcha.js  # Browser widget library
 ```
 
 ## License

@@ -17,7 +17,7 @@ const CHECKSUM_SPACE = 64 ** 6;
 const POW_BITS = 15;
 const CHALLENGES = new Map();
 
-// Per-challenge difficulty knobs (see scripts/solve.mjs for the matching decoder).
+// Per-challenge difficulty knobs for the public demo generator.
 // The real carriers (fiducials + the true data cell) share one phase across every image
 // so a coherent complex sum over the K images reinforces them (K x), while per-image
 // phantoms and decoys carry independent random phase and only random-walk up (sqrt(K) x).
