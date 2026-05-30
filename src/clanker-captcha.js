@@ -719,10 +719,7 @@ export class ClankerCaptcha {
     const input = qs(this.element, ".clanker-captcha__input");
 
     root.dataset.state = "loading";
-    delete root.dataset.clankerTask;
-    delete root.dataset.clankerChallengeId;
-    delete root.dataset.clankerExpiresAt;
-    delete root.dataset.clankerImageCount;
+    for (const key of ["clankerTask", "clankerChallengeId", "clankerExpiresAt", "clankerImageCount"]) delete root.dataset[key];
     root.dataset.clankerManifest = `#${this.manifestId}`;
     root.removeAttribute("aria-label");
     qs(this.element, ".clanker-captcha__agent-instructions").textContent = DEFAULT_AGENT_TASK;
@@ -770,12 +767,9 @@ export class ClankerCaptcha {
     // One slot; every frame is kept in the DOM (so the manifest's per-frame
     // selectors resolve for an agent) but only the active one is visible. We
     // flip the active frame on a timer so all frames flicker through the slot.
-    const frameImgs = images
-      .map(
-        (_, index) =>
-          `<img class="clanker-captcha__image${index === 0 ? " is-active" : ""}" data-frame="${index}" alt="Clanker CAPTCHA fused frame ${index + 1} of ${images.length}" />`
-      )
-      .join("");
+    const frameImgs = images.map((_, index) =>
+      `<img class="clanker-captcha__image${index === 0 ? " is-active" : ""}" data-frame="${index}" alt="Clanker CAPTCHA fused frame ${index + 1} of ${images.length}" />`
+    ).join("");
     const wrap = document.createElement("div");
     wrap.className = "clanker-captcha__image-wrap";
     wrap.innerHTML = `
@@ -820,7 +814,7 @@ export class ClankerCaptcha {
       }
       const badge = qs(this.element, ".clanker-captcha__frame-index");
       if (badge) badge.textContent = `${active + 1}/${frameImgs.length}`;
-      this.applyFrameGlitch(frameImgs[active]);
+      this.applyFrameGlitch();
     }, 220);
   }
 
@@ -964,10 +958,8 @@ export class ClankerCaptcha {
       const buf = enc.encode(`${challengeId}:${nonce}`);
       const hashBuf = await crypto.subtle.digest("SHA-256", buf);
       const hash = new Uint8Array(hashBuf);
-      let ok = true;
-      for (let i = 0; i < fullBytes; i += 1) if (hash[i] !== 0) { ok = false; break; }
-      if (ok && remBits > 0 && hash[fullBytes] >>> (8 - remBits) !== 0) ok = false;
-      if (ok) return String(nonce);
+      if (hash.subarray(0, fullBytes).every((byte) => byte === 0) &&
+        (remBits === 0 || hash[fullBytes] >>> (8 - remBits) === 0)) return String(nonce);
       nonce += 1;
     }
   }

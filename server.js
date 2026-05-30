@@ -50,6 +50,12 @@ function shuffledIndices(n) {
   return arr;
 }
 
+function invertPermutation(permutation) {
+  const inverse = [];
+  permutation.forEach((symbolIndex, cellValue) => { inverse[symbolIndex] = cellValue; });
+  return inverse;
+}
+
 // ----- codebook layout: cellValue (0..63) <-> (col,row) in 0..7 ------------------------
 function layoutToCell(layout, value) {
   if (layout === "col-major") return { col: Math.floor(value / GRID), row: value % GRID };
@@ -80,10 +86,7 @@ function generateParams() {
   const step = randomInt(3, 5); // 3 or 4
   const pitch = 22;
   const base = 8;
-  const anchorX = [];
-  for (let i = 0; i < SLOT_COUNT; i += 1) {
-    anchorX.push(base + i * pitch + randomInt(0, 3));
-  }
+  const anchorX = Array.from({ length: SLOT_COUNT }, (_, i) => base + i * pitch + randomInt(0, 3));
   const anchorY = randomInt(6, 9); // 6..8
   const permutation = shuffledIndices(64); // symbolIndex = permutation[cellValue]
 
@@ -165,6 +168,7 @@ function drawBackground(pixels) {
     { base: [8, 18, 34], a: [250, 255, 48], b: [0, 245, 255], c: [255, 42, 252] }
   ];
   const palette = palettes[randomInt(palettes.length)];
+  const accents = [palette.a, palette.b, palette.c];
   const phaseA = randomPhase();
   const phaseB = randomPhase();
   const noise = randomInt(4, 9);
@@ -208,7 +212,7 @@ function drawBackground(pixels) {
 
   const bars = 14 + randomInt(0, 10);
   for (let i = 0; i < bars; i += 1) {
-    const color = [palette.a, palette.b, palette.c][randomInt(3)];
+    const color = accents[randomInt(3)];
     const x = randomInt(-24, WIDTH - 30);
     const y = randomInt(0, HEIGHT - 4);
     const w = randomInt(26, 118);
@@ -221,7 +225,7 @@ function drawBackground(pixels) {
     const y = randomInt(HEIGHT);
     const height = randomInt(1, 4);
     const shift = randomInt(-52, 53);
-    const tint = [palette.a, palette.b, palette.c][randomInt(3)];
+    const tint = accents[randomInt(3)];
     const tintAmount = 0.06 + randomInt(0, 12) / 100;
     for (let row = y; row < Math.min(HEIGHT, y + height); row += 1) {
       const copy = new Uint8ClampedArray(WIDTH * 4);
@@ -239,7 +243,7 @@ function drawBackground(pixels) {
 
   const blocks = 10 + randomInt(0, 8);
   for (let i = 0; i < blocks; i += 1) {
-    const color = [palette.a, palette.b, palette.c][randomInt(3)];
+    const color = accents[randomInt(3)];
     const w = randomInt(10, 34);
     const h = randomInt(6, 18);
     const x = randomInt(0, WIDTH - w);
@@ -252,7 +256,7 @@ function drawBackground(pixels) {
 
   const sparks = 26 + randomInt(0, 28);
   for (let i = 0; i < sparks; i += 1) {
-    const color = [palette.a, palette.b, palette.c][randomInt(3)];
+    const color = accents[randomInt(3)];
     const x = randomInt(WIDTH);
     const y = randomInt(HEIGHT);
     const length = randomInt(1, 5);
@@ -263,12 +267,8 @@ function drawBackground(pixels) {
 }
 
 // Carriers shared by every image (same phase => add coherently under a complex sum).
-function buildCoherentCarriers(symbols, params) {
+function buildCoherentCarriers(symbols, params, permInv) {
   const carriers = [];
-  const permInv = new Array(64);
-  params.permutation.forEach((symbolIndex, cellValue) => {
-    permInv[symbolIndex] = cellValue;
-  });
 
   for (let slot = 0; slot < SLOT_COUNT; slot += 1) {
     // four corner fiducials, just outside the 0..7 data block, mark the raw grid
@@ -290,12 +290,8 @@ function buildCoherentCarriers(symbols, params) {
 }
 
 // Per-image carriers with fresh random phase => suppressed by the coherent sum.
-function buildIncoherentCarriers(symbols, params) {
+function buildIncoherentCarriers(symbols, params, permInv) {
   const carriers = [];
-  const permInv = new Array(64);
-  params.permutation.forEach((symbolIndex, cellValue) => {
-    permInv[symbolIndex] = cellValue;
-  });
 
   // one phantom per slot: a wrong cell, stronger than the true cell within a single image
   for (let slot = 0; slot < SLOT_COUNT; slot += 1) {
@@ -340,12 +336,13 @@ function injectCarriers(pixels, carriers) {
 }
 
 function generateChallengeImages(symbols, params) {
-  const coherent = buildCoherentCarriers(symbols, params);
+  const permInv = invertPermutation(params.permutation);
+  const coherent = buildCoherentCarriers(symbols, params, permInv);
   const images = [];
   for (let k = 0; k < params.imageCount; k += 1) {
     const pixels = new Uint8ClampedArray(WIDTH * HEIGHT * 4);
     drawBackground(pixels);
-    injectCarriers(pixels, coherent.concat(buildIncoherentCarriers(symbols, params)));
+    injectCarriers(pixels, coherent.concat(buildIncoherentCarriers(symbols, params, permInv)));
     images.push(encodePng(WIDTH, HEIGHT, pixels));
   }
   return images;
@@ -407,15 +404,7 @@ function json(response, status, body) {
 
 function createChallenge() {
   const params = generateParams();
-  const used = new Set();
-  const symbols = [];
-  while (symbols.length < SLOT_COUNT) {
-    const symbol = SYMBOLS[randomInt(SYMBOLS.length)];
-    if (!used.has(symbol)) {
-      used.add(symbol);
-      symbols.push(symbol);
-    }
-  }
+  const symbols = shuffledIndices(SYMBOLS.length).slice(0, SLOT_COUNT).map((index) => SYMBOLS[index]);
 
   const answer = checksum(params, symbols);
   const id = randomBytes(16).toString("hex");
@@ -493,10 +482,9 @@ function checkPow(challengeId, nonce, bits) {
   if (!/^\d+$/.test(nonceStr)) return false;
   const hash = createHash("sha256").update(`${challengeId}:${nonceStr}`).digest();
   const fullBytes = Math.floor(bits / 8);
-  for (let i = 0; i < fullBytes; i += 1) if (hash[i] !== 0) return false;
   const remBits = bits % 8;
-  if (remBits === 0) return true;
-  return hash[fullBytes] >>> (8 - remBits) === 0;
+  return hash.subarray(0, fullBytes).every((byte) => byte === 0) &&
+    (remBits === 0 || hash[fullBytes] >>> (8 - remBits) === 0);
 }
 
 async function readJson(request) {
