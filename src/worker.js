@@ -1,4 +1,4 @@
-import { createChallengeResponse, verifyChallenge } from "./challenge-api.js";
+import { createChallengeResponse, resolveSecret, verifyChallenge } from "./challenge-api.js";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
@@ -15,14 +15,15 @@ function json(body, status = 200) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const secret = resolveSecret(env);
 
     try {
       if (request.method === "GET" && url.pathname === "/api/challenge") {
-        return json(createChallengeResponse());
+        return json(createChallengeResponse(secret));
       }
 
       if (request.method === "POST" && url.pathname === "/api/verify") {
-        const result = verifyChallenge(await request.json().catch(() => ({})));
+        const result = verifyChallenge(await request.json().catch(() => ({})), secret);
         return json(
           result.ok ? { ok: true, token: result.token } : { ok: false, error: result.error },
           result.status

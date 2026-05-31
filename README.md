@@ -151,7 +151,7 @@ For each challenge, the server:
 3. Renders several PNG frames with corrupted neon video texture.
 4. Injects coherent Fourier carriers for the real fiducials and data cells.
 5. Injects per-frame phantom carriers and decoys with random phase.
-6. Stores only the expected checksum and expiry server-side.
+6. Signs the expiry and expected checksum into the challenge id (HMAC), keeping no server-side state.
 
 A compliant agent is expected to solve from rendered frames and the public
 manifest for that live challenge. This public repository intentionally does not
@@ -162,10 +162,27 @@ the implementation instead of performing the intended pixel-grounded work.
 
 The included server is deliberately dependency-free and suitable for local demos. It is not an application framework.
 
+Challenge state is stateless and signed: `createChallenge` packs the expiry and a
+random salt into the challenge id and HMACs them together with the expected checksum.
+`verifyChallenge` recomputes the HMAC from the submitted answer, so no per-challenge
+record is stored anywhere. This is what lets it run unchanged on Cloudflare Workers,
+where each request may hit a different (and frequently recycled) isolate — an
+in-memory store would lose challenges between `/api/challenge` and `/api/verify`.
+
+Set `CHALLENGE_SECRET` so every instance/isolate signs with the same key:
+
+```sh
+# Cloudflare
+wrangler secret put CHALLENGE_SECRET
+# Local / Node demo
+CHALLENGE_SECRET=your-long-random-string npm run demo
+```
+
+Without it, the server falls back to an insecure built-in dev key and logs a warning.
+
 Production integrations should replace it with application-specific endpoints that add:
 
-- Persistent challenge storage or signed challenge state.
-- Replay protection and one-time token handling.
+- Replay protection and one-time token handling (the signed id is currently replayable within its short TTL; a Durable Object can burn it single-use).
 - Rate limiting and abuse telemetry.
 - CSRF/CORS policy appropriate to the host app.
 - Stronger token issuance and session binding.
@@ -188,8 +205,11 @@ and confirm the verification state changes.
 .
 ├── index.html              # Demo page
 ├── package.json            # ESM package metadata and scripts
-├── server.js               # Local challenge/verify/static server
+├── server.js               # Local static + challenge/verify server (Node)
+├── wrangler.jsonc          # Cloudflare Workers deployment config
 └── src/
+    ├── challenge-api.js    # Shared challenge generation + stateless verify
+    ├── worker.js           # Cloudflare Worker entrypoint
     └── clanker-captcha.js  # Browser widget library
 ```
 

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
 const WIDTH = 280;
@@ -9,7 +9,9 @@ const SLOT_COUNT = 6;
 const GRID = 8; // 8x8 cells per slot => 64 values
 const CHECKSUM_SPACE = 64 ** 6;
 const POW_BITS = 15;
-const CHALLENGES = new Map();
+// Dev fallback only. Production MUST set env.CHALLENGE_SECRET so every isolate
+// signs and verifies with the same key (see resolveSecret / worker.js).
+const DEV_SECRET = "clanker-captcha-insecure-dev-secret";
 
 // Per-challenge difficulty knobs for the public demo generator.
 // The real carriers (fiducials + the true data cell) share one phase across every image
@@ -389,16 +391,48 @@ function json(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-function createChallenge() {
+// Resolve the signing key. Workers pass `env`, Node passes nothing (we read
+// process.env). Falls back to a fixed dev key with a one-time warning so the
+// demo runs out of the box, but a real deployment must configure a secret.
+let warnedMissingSecret = false;
+export function resolveSecret(env) {
+  const secret =
+    (env && env.CHALLENGE_SECRET) ||
+    (typeof process !== "undefined" && process.env && process.env.CHALLENGE_SECRET);
+  if (secret) return secret;
+  if (!warnedMissingSecret) {
+    warnedMissingSecret = true;
+    console.warn("CHALLENGE_SECRET is not set; using an insecure dev key. Set it before deploying.");
+  }
+  return DEV_SECRET;
+}
+
+// HMAC binds (expiresAt, salt, answer) together. The id carries expiresAt+salt+sig
+// but NOT the answer, so the agent still has to solve for it; verify recomputes the
+// HMAC from the submitted answer and accepts only if it matches. No server-side
+// state, so it survives Cloudflare's per-isolate memory and isolate eviction.
+function signChallenge(secret, expiresAt, salt, answer) {
+  return createHmac("sha256", secret)
+    .update(`${expiresAt}.${salt}.${answer}`)
+    .digest("hex");
+}
+
+function safeEqualHex(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length || a.length === 0) {
+    return false;
+  }
+  return timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+}
+
+function createChallenge(secret) {
   const params = generateParams();
   const symbols = shuffledIndices(SYMBOLS.length).slice(0, SLOT_COUNT).map((index) => SYMBOLS[index]);
 
   const answer = checksum(params, symbols);
-  const id = randomBytes(16).toString("hex");
   const expiresAt = Date.now() + TTL_MS;
+  const salt = randomBytes(16).toString("hex");
+  const id = `${expiresAt}.${salt}.${signChallenge(secret, expiresAt, salt, answer)}`;
   const images = generateChallengeImages(symbols, params);
-
-  CHALLENGES.set(id, { answer, expiresAt });
 
   return {
     id,
@@ -480,52 +514,54 @@ export async function readNodeJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-export function verifyChallenge(body) {
-  const challenge = CHALLENGES.get(body.challengeId);
-  if (!challenge) return { ok: false, status: 400, error: "Unknown challenge." };
-  CHALLENGES.delete(body.challengeId);
+export function verifyChallenge(body, secret) {
+  const id = String(body.challengeId || "");
+  const parts = id.split(".");
+  if (parts.length !== 3) return { ok: false, status: 400, error: "Unknown challenge." };
+  const [expiresAtStr, salt, sig] = parts;
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || !/^[0-9a-f]+$/.test(salt) || !/^[0-9a-f]+$/.test(sig)) {
+    return { ok: false, status: 400, error: "Unknown challenge." };
+  }
 
-  if (Date.now() > challenge.expiresAt) {
+  if (Date.now() > expiresAt) {
     return { ok: false, status: 410, error: "Challenge expired." };
   }
 
-  if (!checkPow(body.challengeId, body.nonce, POW_BITS)) {
+  if (!checkPow(id, body.nonce, POW_BITS)) {
     return { ok: false, status: 400, error: "Proof-of-work invalid." };
   }
 
-  if (String(body.answer || "").trim() !== challenge.answer) {
+  // Tampering with expiresAt or salt also lands here: the signature only matches
+  // when (expiresAt, salt, answer) reproduce the value minted by createChallenge.
+  // Replay within the TTL is possible (no server state to burn the id); the short
+  // TTL + per-id PoW keep that expensive — add a Durable Object if you need single-use.
+  const answer = String(body.answer || "").trim();
+  if (!safeEqualHex(sig, signChallenge(secret, expiresAtStr, salt, answer))) {
     return { ok: false, status: 400, error: "Fourier checksum mismatch." };
   }
 
   const token = createHash("sha256")
-    .update(`${body.challengeId}:${challenge.answer}:${Date.now()}`)
+    .update(`${id}:${answer}:${Date.now()}`)
     .digest("hex");
   return { ok: true, status: 200, token };
-}
-
-function cleanupExpiredChallenges() {
-  const now = Date.now();
-  for (const [id, challenge] of CHALLENGES) {
-    if (challenge.expiresAt < now) CHALLENGES.delete(id);
-  }
 }
 
 export function writeJson(response, status, body) {
   json(response, status, body);
 }
 
-export function handleChallengeRequest(request, response) {
+export function handleChallengeRequest(request, response, secret = resolveSecret()) {
   try {
     if (request.method === "GET" && request.url?.startsWith("/api/challenge")) {
-      cleanupExpiredChallenges();
-      json(response, 200, createChallenge());
+      json(response, 200, createChallenge(secret));
       return;
     }
 
     if (request.method === "POST" && request.url?.startsWith("/api/verify")) {
       readNodeJson(request)
         .then((body) => {
-          const result = verifyChallenge(body);
+          const result = verifyChallenge(body, secret);
           json(response, result.status, result.ok ? { ok: true, token: result.token } : { ok: false, error: result.error });
         })
         .catch((error) => json(response, 400, { ok: false, error: error.message }));
@@ -539,7 +575,6 @@ export function handleChallengeRequest(request, response) {
   return true;
 }
 
-export function createChallengeResponse() {
-  cleanupExpiredChallenges();
-  return createChallenge();
+export function createChallengeResponse(secret = resolveSecret()) {
+  return createChallenge(secret);
 }
