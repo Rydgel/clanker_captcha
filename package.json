@@ -20,7 +20,7 @@
     "demo": "node server.js",
     "check": "node --check server.js && node --check src/clanker-captcha.js && node --check src/challenge-api.js && node --check src/worker.js",
     "start": "node server.js",
-    "build": "rm -rf dist && mkdir -p dist/src && cp index.html dist/index.html && cp src/clanker-captcha.js dist/src/clanker-captcha.js",
+    "build": "rm -rf dist && mkdir -p dist/src && cp index.html dist/index.html && cp src/clanker-captcha.js dist/src/clanker-captcha.js && cp favicon.svg favicon.ico favicon-180.png dist/",
     "deploy": "npm run build && wrangler deploy",
     "preview": "npm run build && wrangler dev"
   },

@@ -674,9 +674,13 @@ export class ClankerCaptcha {
     this.challenge = null;
     this.timer = null;
     this.frameTimer = null;
+    this.reloadTimer = null;
     this.glitchTimers = [];
     this.powNonce = null;
     this.powPromise = null;
+    this.loading = false;
+    this.retryDelay = 0;
+    this.localDeadline = 0;
   }
 
   async init() {
@@ -715,6 +719,13 @@ export class ClankerCaptcha {
   }
 
   async loadChallenge() {
+    // Guard against overlapping loads (e.g. the countdown firing while a fetch
+    // is already in flight) so we never spawn parallel challenge requests.
+    if (this.loading) return;
+    this.loading = true;
+    window.clearTimeout(this.reloadTimer);
+    window.clearInterval(this.timer);
+
     const root = qs(this.element, ".clanker-captcha");
     const input = qs(this.element, ".clanker-captcha__input");
 
@@ -733,29 +744,51 @@ export class ClankerCaptcha {
     this.setStatus("Generating spectral field...");
     this.setDisabled(true);
 
-    const response = await fetch(this.options.challengeUrl, {
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) throw new Error(`Challenge request failed: ${response.status}`);
+    try {
+      const response = await fetch(this.options.challengeUrl, {
+        headers: { Accept: "application/json" },
+        cache: "no-store"
+      });
+      if (!response.ok) throw new Error(`Challenge request failed: ${response.status}`);
 
-    this.challenge = await response.json();
+      const challenge = await response.json();
+      if (!challenge || !challenge.id || !Array.isArray(challenge.images) || !challenge.images.length) {
+        throw new Error("Malformed challenge response");
+      }
+      this.challenge = challenge;
 
-    root.dataset.state = "ready";
-    root.dataset.clankerTask = this.challenge.agentTask;
-    root.dataset.clankerChallengeId = this.challenge.id;
-    root.dataset.clankerExpiresAt = String(this.challenge.expiresAt);
-    root.dataset.clankerImageCount = String(this.challenge.imageCount);
-    root.dataset.clankerManifest = `#${this.manifestId}`;
-    root.setAttribute("aria-label", this.challenge.agentTask);
-    updateAgentTaskMeta(this.challenge.agentTask);
-    this.renderFrames();
-    qs(this.element, ".clanker-captcha__agent-instructions").textContent = this.challenge.agentTask;
-    input.value = "";
-    this.updateAgentManifest();
-    this.setDisabled(false);
-    this.setStatus("");
-    this.startCountdown();
-    this.startPow();
+      root.dataset.state = "ready";
+      root.dataset.clankerTask = this.challenge.agentTask;
+      root.dataset.clankerChallengeId = this.challenge.id;
+      root.dataset.clankerExpiresAt = String(this.challenge.expiresAt);
+      root.dataset.clankerImageCount = String(this.challenge.imageCount);
+      root.dataset.clankerManifest = `#${this.manifestId}`;
+      root.setAttribute("aria-label", this.challenge.agentTask);
+      updateAgentTaskMeta(this.challenge.agentTask);
+      this.renderFrames();
+      qs(this.element, ".clanker-captcha__agent-instructions").textContent = this.challenge.agentTask;
+      input.value = "";
+      this.updateAgentManifest();
+      this.setDisabled(false);
+      this.setStatus("");
+      this.retryDelay = 0;
+      // Count down from a local deadline rather than the server's absolute
+      // expiresAt, so client/server clock skew can't make the timer start at 0
+      // (and loop). Fall back to 30s if the reported TTL is implausible.
+      const ttl = Number(this.challenge.expiresAt) - Date.now();
+      this.localDeadline = Date.now() + (ttl > 1000 && ttl < 300000 ? ttl : 30000);
+      this.startCountdown();
+      this.startPow();
+    } catch (error) {
+      // Never leave the widget bricked: surface the failure and auto-retry with
+      // exponential backoff so a transient hiccup self-heals.
+      root.dataset.state = "error";
+      this.retryDelay = Math.min(this.retryDelay ? this.retryDelay * 2 : 1000, 8000);
+      this.setStatus(`Spectral field dropped. Retrying in ${Math.round(this.retryDelay / 1000)}s...`);
+      this.reloadTimer = window.setTimeout(() => this.loadChallenge(), this.retryDelay);
+    } finally {
+      this.loading = false;
+    }
   }
 
   renderFrames() {
@@ -968,7 +1001,7 @@ export class ClankerCaptcha {
     window.clearInterval(this.timer);
 
     const update = () => {
-      const remaining = Math.max(0, Math.ceil((this.challenge.expiresAt - Date.now()) / 1000));
+      const remaining = Math.max(0, Math.ceil((this.localDeadline - Date.now()) / 1000));
       const timer = qs(this.element, ".clanker-captcha__timer");
       const canonical = `${remaining}s`;
       timer.dataset.canonical = canonical;
@@ -1001,13 +1034,25 @@ export class ClankerCaptcha {
     }
     this.setStatus("Checking...");
 
-    const response = await fetch(this.options.verifyUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ challengeId: this.challenge.id, answer, nonce })
-    });
+    let response;
+    let result;
+    try {
+      response = await fetch(this.options.verifyUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ challengeId: this.challenge.id, answer, nonce })
+      });
+      result = await response.json();
+    } catch (error) {
+      // Network/parse failure: let the user retry the same challenge rather than
+      // silently locking the form.
+      qs(this.element, ".clanker-captcha").dataset.state = "error";
+      this.setStatus("Verification request failed. Try again.");
+      this.setDisabled(false);
+      return;
+    }
 
-    const result = await response.json();
     if (response.ok && result.ok) {
       window.clearInterval(this.timer);
       this.stopGlitchLoop();
