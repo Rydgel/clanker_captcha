@@ -1,12 +1,6 @@
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
 import { deflateSync } from "node:zlib";
 
-const HOST = process.env.HOST || "127.0.0.1";
-const PORT = Number(process.env.PORT || 4173);
-const ROOT = process.cwd();
 const WIDTH = 280;
 const HEIGHT = 84;
 const TTL_MS = 30_000;
@@ -29,13 +23,6 @@ const FIDUCIAL_FACTOR = 3.2; // fiducials are the strongest coherent carriers
 const PHANTOM_FACTOR = 1.3; // per-image phantom still beats the true cell, with less visual snow
 const DECOY_AMP = 4;
 const DECOY_COUNT = 6;
-
-const MIME_TYPES = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8"
-};
 
 function clamp(value) {
   return Math.max(0, Math.min(255, Math.round(value)));
@@ -487,13 +474,13 @@ function checkPow(challengeId, nonce, bits) {
     (remBits === 0 || hash[fullBytes] >>> (8 - remBits) === 0);
 }
 
-async function readJson(request) {
+export async function readNodeJson(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-function verifyChallenge(body) {
+export function verifyChallenge(body) {
   const challenge = CHALLENGES.get(body.challengeId);
   if (!challenge) return { ok: false, status: 400, error: "Unknown challenge." };
   CHALLENGES.delete(body.challengeId);
@@ -516,30 +503,6 @@ function verifyChallenge(body) {
   return { ok: true, status: 200, token };
 }
 
-async function serveStatic(request, response) {
-  const url = new URL(request.url, `http://${request.headers.host}`);
-  const rawPath = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  const filePath = normalize(join(ROOT, rawPath));
-
-  if (!filePath.startsWith(ROOT)) {
-    response.writeHead(403);
-    response.end("Forbidden");
-    return;
-  }
-
-  try {
-    const body = await readFile(filePath);
-    response.writeHead(200, {
-      "Content-Type": MIME_TYPES[extname(filePath)] || "application/octet-stream",
-      "Cache-Control": "no-store"
-    });
-    response.end(body);
-  } catch {
-    response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-    response.end("Not found");
-  }
-}
-
 function cleanupExpiredChallenges() {
   const now = Date.now();
   for (const [id, challenge] of CHALLENGES) {
@@ -547,7 +510,11 @@ function cleanupExpiredChallenges() {
   }
 }
 
-const server = createServer(async (request, response) => {
+export function writeJson(response, status, body) {
+  json(response, status, body);
+}
+
+export function handleChallengeRequest(request, response) {
   try {
     if (request.method === "GET" && request.url?.startsWith("/api/challenge")) {
       cleanupExpiredChallenges();
@@ -556,23 +523,23 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && request.url?.startsWith("/api/verify")) {
-      const result = verifyChallenge(await readJson(request));
-      json(response, result.status, result.ok ? { ok: true, token: result.token } : { ok: false, error: result.error });
+      readNodeJson(request)
+        .then((body) => {
+          const result = verifyChallenge(body);
+          json(response, result.status, result.ok ? { ok: true, token: result.token } : { ok: false, error: result.error });
+        })
+        .catch((error) => json(response, 400, { ok: false, error: error.message }));
       return;
     }
 
-    if (request.method === "GET") {
-      await serveStatic(request, response);
-      return;
-    }
-
-    response.writeHead(405);
-    response.end("Method not allowed");
+    return false;
   } catch (error) {
     json(response, 500, { ok: false, error: error.message });
   }
-});
+  return true;
+}
 
-server.listen(PORT, HOST, () => {
-  console.log(`Clanker CAPTCHA demo running at http://${HOST}:${PORT}`);
-});
+export function createChallengeResponse() {
+  cleanupExpiredChallenges();
+  return createChallenge();
+}

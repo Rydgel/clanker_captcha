@@ -18,8 +18,11 @@
   ],
   "scripts": {
     "demo": "node server.js",
-    "check": "node --check server.js && node --check src/clanker-captcha.js",
-    "start": "node server.js"
+    "check": "node --check server.js && node --check src/clanker-captcha.js && node --check src/challenge-api.js && node --check src/worker.js",
+    "start": "node server.js",
+    "build": "rm -rf dist && mkdir -p dist/src && cp index.html dist/index.html && cp src/clanker-captcha.js dist/src/clanker-captcha.js",
+    "deploy": "npm run build && wrangler deploy",
+    "preview": "npm run build && wrangler dev"
   },
   "files": [
     "src",
@@ -30,6 +33,9 @@
   ],
   "exports": {
     ".": "./src/clanker-captcha.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.95.0"
   },
   "engines": {
     "node": ">=18"
