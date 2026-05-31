@@ -10,5 +10,10 @@
   },
   "observability": {
     "enabled": true
+  },
+  // Paid plan: default CPU limit is 30s. Challenge generation runs ~37ms, so this
+  // 1s cap is ~25x headroom (no spurious 503s) while still bounding cost/runaway loops.
+  "limits": {
+    "cpu_ms": 1000
   }
 }

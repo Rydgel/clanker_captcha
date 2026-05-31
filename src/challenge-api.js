@@ -131,14 +131,6 @@ function encodeBase64Number(value, length) {
   return output;
 }
 
-function setPixel(pixels, x, y, r, g, b, a = 255) {
-  const offset = (y * WIDTH + x) * 4;
-  pixels[offset] = clamp(r);
-  pixels[offset + 1] = clamp(g);
-  pixels[offset + 2] = clamp(b);
-  pixels[offset + 3] = a;
-}
-
 function randomPhase() {
   return (randomInt(1_000_000) / 1_000_000) * Math.PI * 2;
 }
@@ -148,21 +140,45 @@ function randomWeights(spread = 0.16) {
   return [jitter(), jitter(), jitter()];
 }
 
+const PALETTES = [
+  { base: [12, 14, 30], a: [0, 245, 255], b: [255, 42, 252], c: [250, 255, 48] },
+  { base: [18, 10, 32], a: [37, 255, 154], b: [255, 42, 252], c: [0, 245, 255] },
+  { base: [8, 18, 34], a: [250, 255, 48], b: [0, 245, 255], c: [255, 42, 252] }
+];
+
+// The radial blooms depend only on pixel position (fixed centers), so they are
+// identical for every image and every challenge. Compute the two maps once per
+// isolate instead of calling Math.hypot W*H times per image.
+let BLOOM_CACHE = null;
+function getBloomMaps() {
+  if (BLOOM_CACHE) return BLOOM_CACHE;
+  const a = new Float32Array(WIDTH * HEIGHT);
+  const b = new Float32Array(WIDTH * HEIGHT);
+  for (let y = 0; y < HEIGHT; y += 1) {
+    const yNorm = y / (HEIGHT - 1);
+    for (let x = 0; x < WIDTH; x += 1) {
+      const xNorm = x / (WIDTH - 1);
+      const i = y * WIDTH + x;
+      a[i] = Math.max(0, 1 - Math.hypot(xNorm - 0.18, yNorm - 0.28) * 2.4);
+      b[i] = Math.max(0, 1 - Math.hypot(xNorm - 0.82, yNorm - 0.68) * 2.2);
+    }
+  }
+  BLOOM_CACHE = { a, b };
+  return BLOOM_CACHE;
+}
+
 // Each image gets its own corrupted video texture so the frames visibly differ
 // (the coherent carriers live in the frequency domain and are unaffected).
 function drawBackground(pixels) {
-  const palettes = [
-    { base: [12, 14, 30], a: [0, 245, 255], b: [255, 42, 252], c: [250, 255, 48] },
-    { base: [18, 10, 32], a: [37, 255, 154], b: [255, 42, 252], c: [0, 245, 255] },
-    { base: [8, 18, 34], a: [250, 255, 48], b: [0, 245, 255], c: [255, 42, 252] }
-  ];
-  const palette = palettes[randomInt(palettes.length)];
+  const palette = PALETTES[randomInt(PALETTES.length)];
   const accents = [palette.a, palette.b, palette.c];
   const phaseA = randomPhase();
   const phaseB = randomPhase();
   const noise = randomInt(4, 9);
+  const noiseSpan = 2 * noise + 1;
   const scanStep = 3 + randomInt(0, 2);
   const scanDark = randomInt(10, 22);
+  const { a: bloomMapA, b: bloomMapB } = getBloomMaps();
 
   const blendPixel = (x, y, r, g, b, alpha) => {
     if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
@@ -182,20 +198,42 @@ function drawBackground(pixels) {
     }
   };
 
+  // diagonal = sin(x*0.045 + y*0.12 + phaseA), ripple = cos(x*0.12 - y*0.055 + phaseB).
+  // Both separate into per-column and per-row tables via the angle-addition identity,
+  // so the inner loop does multiplies instead of a sin + cos per pixel.
+  const dSinX = new Float64Array(WIDTH), dCosX = new Float64Array(WIDTH);
+  const rSinX = new Float64Array(WIDTH), rCosX = new Float64Array(WIDTH);
+  for (let x = 0; x < WIDTH; x += 1) {
+    dSinX[x] = Math.sin(x * 0.045); dCosX[x] = Math.cos(x * 0.045);
+    rSinX[x] = Math.sin(x * 0.12); rCosX[x] = Math.cos(x * 0.12);
+  }
+  const dSinY = new Float64Array(HEIGHT), dCosY = new Float64Array(HEIGHT);
+  const rSinY = new Float64Array(HEIGHT), rCosY = new Float64Array(HEIGHT);
   for (let y = 0; y < HEIGHT; y += 1) {
-    const yNorm = y / (HEIGHT - 1);
+    dSinY[y] = Math.sin(y * 0.12 + phaseA); dCosY[y] = Math.cos(y * 0.12 + phaseA);
+    rSinY[y] = Math.sin(-y * 0.055 + phaseB); rCosY[y] = Math.cos(-y * 0.055 + phaseB);
+  }
+
+  const [b0, b1, b2] = palette.base;
+  const [pa0, pa1, pa2] = palette.a;
+  const [pb0, pb1, pb2] = palette.b;
+  const pc1 = palette.c[1];
+
+  for (let y = 0; y < HEIGHT; y += 1) {
     const scan = y % scanStep === 0 ? -scanDark : 0;
+    const dcy = dCosY[y], dsy = dSinY[y], rcy = rCosY[y], rsy = rSinY[y];
+    const row = y * WIDTH;
     for (let x = 0; x < WIDTH; x += 1) {
-      const xNorm = x / (WIDTH - 1);
-      const diagonal = Math.sin(x * 0.045 + y * 0.12 + phaseA) * 18;
-      const ripple = Math.cos(x * 0.12 - y * 0.055 + phaseB) * 10;
-      const bloomA = Math.max(0, 1 - Math.hypot(xNorm - 0.18, yNorm - 0.28) * 2.4);
-      const bloomB = Math.max(0, 1 - Math.hypot(xNorm - 0.82, yNorm - 0.68) * 2.2);
-      const micro = randomInt(-noise, noise + 1);
-      const r = palette.base[0] + palette.a[0] * bloomA * 0.2 + palette.b[0] * bloomB * 0.24 + diagonal + micro + scan;
-      const g = palette.base[1] + palette.a[1] * bloomA * 0.22 + palette.c[1] * bloomB * 0.16 + ripple + micro + scan;
-      const b = palette.base[2] + palette.a[2] * bloomA * 0.26 + palette.b[2] * bloomB * 0.2 - diagonal * 0.35 + micro + scan;
-      setPixel(pixels, x, y, r, g, b);
+      const i = row + x;
+      const diagonal = (dSinX[x] * dcy + dCosX[x] * dsy) * 18;
+      const ripple = (rCosX[x] * rcy - rSinX[x] * rsy) * 10;
+      const bloomA = bloomMapA[i], bloomB = bloomMapB[i];
+      const micro = ((Math.random() * noiseSpan) | 0) - noise;
+      const o = i * 4;
+      pixels[o] = clamp(b0 + pa0 * bloomA * 0.2 + pb0 * bloomB * 0.24 + diagonal + micro + scan);
+      pixels[o + 1] = clamp(b1 + pa1 * bloomA * 0.22 + pc1 * bloomB * 0.16 + ripple + micro + scan);
+      pixels[o + 2] = clamp(b2 + pa2 * bloomA * 0.26 + pb2 * bloomB * 0.2 - diagonal * 0.35 + micro + scan);
+      pixels[o + 3] = 255;
     }
   }
 
@@ -307,20 +345,43 @@ function buildIncoherentCarriers(symbols, params, permInv) {
 }
 
 function injectCarriers(pixels, carriers) {
-  for (let y = 0; y < HEIGHT; y += 1) {
-    for (let x = 0; x < WIDTH; x += 1) {
-      const offset = (y * WIDTH + x) * 4;
-      let r = pixels[offset];
-      let g = pixels[offset + 1];
-      let b = pixels[offset + 2];
-      for (const c of carriers) {
-        const wave = Math.cos(Math.PI * 2 * (c.kx * x / WIDTH + c.ky * y / HEIGHT) + c.phase);
-        r += wave * c.amplitude * c.weights[0];
-        g += wave * c.amplitude * c.weights[1];
-        b += wave * c.amplitude * c.weights[2];
+  // cos(2π(kx·x/W + ky·y/H) + φ) = cos(Ax + By) = cosAx·cosBy − sinAx·sinBy, where
+  // Ax = 2π·kx·x/W and By = 2π·ky·y/H + φ. Precomputing cos/sin over the W columns
+  // and H rows once per carrier turns ~W*H cosines per carrier into W+H — the inner
+  // loop becomes plain multiply-adds. Output is mathematically identical.
+  const N = WIDTH * HEIGHT;
+  const accR = new Float64Array(N), accG = new Float64Array(N), accB = new Float64Array(N);
+  for (let i = 0; i < N; i += 1) {
+    const o = i * 4;
+    accR[i] = pixels[o]; accG[i] = pixels[o + 1]; accB[i] = pixels[o + 2];
+  }
+
+  const cosX = new Float64Array(WIDTH), sinX = new Float64Array(WIDTH);
+  const cosY = new Float64Array(HEIGHT), sinY = new Float64Array(HEIGHT);
+  const TAU = Math.PI * 2;
+
+  for (const c of carriers) {
+    const fx = TAU * c.kx / WIDTH;
+    for (let x = 0; x < WIDTH; x += 1) { const a = fx * x; cosX[x] = Math.cos(a); sinX[x] = Math.sin(a); }
+    const fy = TAU * c.ky / HEIGHT;
+    for (let y = 0; y < HEIGHT; y += 1) { const b = fy * y + c.phase; cosY[y] = Math.cos(b); sinY[y] = Math.sin(b); }
+
+    const aR = c.amplitude * c.weights[0];
+    const aG = c.amplitude * c.weights[1];
+    const aB = c.amplitude * c.weights[2];
+    for (let y = 0; y < HEIGHT; y += 1) {
+      const cby = cosY[y], sby = sinY[y], row = y * WIDTH;
+      for (let x = 0; x < WIDTH; x += 1) {
+        const wave = cosX[x] * cby - sinX[x] * sby;
+        const i = row + x;
+        accR[i] += wave * aR; accG[i] += wave * aG; accB[i] += wave * aB;
       }
-      setPixel(pixels, x, y, r, g, b);
     }
+  }
+
+  for (let i = 0; i < N; i += 1) {
+    const o = i * 4;
+    pixels[o] = clamp(accR[i]); pixels[o + 1] = clamp(accG[i]); pixels[o + 2] = clamp(accB[i]);
   }
 }
 
