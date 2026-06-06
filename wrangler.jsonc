@@ -15,5 +15,17 @@
   // 1s cap is ~25x headroom (no spurious 503s) while still bounding cost/runaway loops.
   "limits": {
     "cpu_ms": 1000
+  },
+  // Per-IP rate limit (Workers native binding) — caps /api/* abuse and cost.
+  // 60 requests / 60s per client IP; the worker fails open if this is absent.
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "API_RATE_LIMIT",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 60, "period": 60 }
+      }
+    ]
   }
 }

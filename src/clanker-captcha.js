@@ -681,6 +681,9 @@ export class ClankerCaptcha {
     this.loading = false;
     this.retryDelay = 0;
     this.localDeadline = 0;
+    this.powToken = 0;
+    this.fetchTimeoutMs = options.fetchTimeoutMs || 15000;
+    this.onVisibilityChange = this.onVisibilityChange.bind(this);
   }
 
   async init() {
@@ -689,7 +692,43 @@ export class ClankerCaptcha {
     updateAgentTaskMeta(DEFAULT_AGENT_TASK);
     this.renderShell();
     this.startGlitchLoop();
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
     await this.loadChallenge();
+  }
+
+  // Abort a fetch that hangs so it can't leave the widget waiting forever; the
+  // rejection flows into the caller's retry path.
+  async fetchWithTimeout(url, opts = {}) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), this.fetchTimeoutMs);
+    try {
+      return await fetch(url, { ...opts, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  // Pause the animation/countdown/PoW work while the tab is hidden (saves CPU and
+  // battery, especially with multiple widgets); resume — or refresh if the challenge
+  // lapsed while hidden — when it becomes visible again.
+  onVisibilityChange() {
+    if (document.hidden) {
+      window.clearInterval(this.timer);
+      this.stopFrameCycle();
+      this.stopGlitchLoop();
+      this.powToken += 1; // cancel any in-flight PoW search
+      return;
+    }
+    const solved = qs(this.element, ".clanker-captcha")?.dataset.state === "solved";
+    if (solved || this.loading) return;
+    this.startGlitchLoop();
+    if (this.challenge && Date.now() < this.localDeadline) {
+      this.startFrameCycle();
+      this.startCountdown();
+      if (!this.powNonce) this.startPow();
+    } else {
+      this.loadChallenge();
+    }
   }
 
   renderShell() {
@@ -745,7 +784,7 @@ export class ClankerCaptcha {
     this.setDisabled(true);
 
     try {
-      const response = await fetch(this.options.challengeUrl, {
+      const response = await this.fetchWithTimeout(this.options.challengeUrl, {
         headers: { Accept: "application/json" },
         cache: "no-store"
       });
@@ -973,21 +1012,24 @@ export class ClankerCaptcha {
   startPow() {
     const pow = this.challenge.agentManifest.solve.pow;
     const challengeId = this.challenge.id;
+    const token = ++this.powToken;
     this.powNonce = null;
-    this.powPromise = this.findPow(challengeId, pow.difficultyBits).then((nonce) => {
-      if (this.challenge && this.challenge.id === challengeId) {
+    this.powPromise = this.findPow(challengeId, pow.difficultyBits, token).then((nonce) => {
+      if (nonce !== null && this.challenge && this.challenge.id === challengeId) {
         this.powNonce = nonce;
       }
       return nonce;
     });
   }
 
-  async findPow(challengeId, bits) {
+  async findPow(challengeId, bits, token) {
     const enc = new TextEncoder();
     const fullBytes = Math.floor(bits / 8);
     const remBits = bits % 8;
     let nonce = 0;
     while (true) {
+      // Bail out if this search has been superseded (new challenge / tab hidden).
+      if (token !== this.powToken) return null;
       const buf = enc.encode(`${challengeId}:${nonce}`);
       const hashBuf = await crypto.subtle.digest("SHA-256", buf);
       const hash = new Uint8Array(hashBuf);
@@ -1032,12 +1074,17 @@ export class ClankerCaptcha {
       this.setStatus("Sealing proof-of-work...");
       nonce = await this.powPromise;
     }
+    if (!nonce) {
+      // PoW search was cancelled (e.g. tab hidden) — run a fresh one to completion.
+      this.startPow();
+      nonce = await this.powPromise;
+    }
     this.setStatus("Checking...");
 
     let response;
     let result;
     try {
-      response = await fetch(this.options.verifyUrl, {
+      response = await this.fetchWithTimeout(this.options.verifyUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         cache: "no-store",
@@ -1075,5 +1122,15 @@ export class ClankerCaptcha {
   setDisabled(disabled) {
     qs(this.element, ".clanker-captcha__input").disabled = disabled;
     qs(this.element, ".clanker-captcha__button").disabled = disabled;
+  }
+
+  // Tear down all timers, the in-flight PoW search, and the document listener.
+  destroy() {
+    window.clearInterval(this.timer);
+    window.clearTimeout(this.reloadTimer);
+    this.stopFrameCycle();
+    this.stopGlitchLoop();
+    this.powToken += 1;
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
   }
 }

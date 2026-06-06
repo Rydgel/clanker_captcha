@@ -4,6 +4,7 @@ import { deflateSync } from "node:zlib";
 const WIDTH = 280;
 const HEIGHT = 84;
 const TTL_MS = 30_000;
+const TOKEN_TTL_MS = 5 * 60_000; // how long a success token stays valid for the host app
 const SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const SLOT_COUNT = 6;
 const GRID = 8; // 8x8 cells per slot => 64 values
@@ -485,6 +486,32 @@ function safeEqualHex(a, b) {
   return timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
 }
 
+// Success token: HMAC-signed so a host app can verify it was issued by this service
+// and hasn't expired, without sharing any per-request state. Format: iat.exp.jti.sig
+// (all the bytes the signature covers travel in the token; sig proves authenticity).
+function issueToken(secret) {
+  const issuedAt = Date.now();
+  const exp = issuedAt + TOKEN_TTL_MS;
+  const jti = randomBytes(8).toString("hex");
+  const body = `${issuedAt}.${exp}.${jti}`;
+  return `${body}.${createHmac("sha256", secret).update(body).digest("hex")}`;
+}
+
+// Verify a success token. Returns { ok, issuedAt, exp } or { ok:false, error }.
+// The host app calls this (via /api/verify-token or by importing it) to trust a token.
+export function verifyToken(token, secret = resolveSecret()) {
+  const parts = String(token || "").split(".");
+  if (parts.length !== 4) return { ok: false, error: "Malformed token." };
+  const [issuedAt, exp, jti, sig] = parts;
+  if (!/^\d+$/.test(issuedAt) || !/^\d+$/.test(exp) || !/^[0-9a-f]+$/.test(jti) || !/^[0-9a-f]+$/.test(sig)) {
+    return { ok: false, error: "Malformed token." };
+  }
+  const expected = createHmac("sha256", secret).update(`${issuedAt}.${exp}.${jti}`).digest("hex");
+  if (!safeEqualHex(sig, expected)) return { ok: false, error: "Bad signature." };
+  if (Date.now() > Number(exp)) return { ok: false, error: "Token expired." };
+  return { ok: true, issuedAt: Number(issuedAt), exp: Number(exp) };
+}
+
 function createChallenge(secret) {
   const params = generateParams();
   const symbols = shuffledIndices(SYMBOLS.length).slice(0, SLOT_COUNT).map((index) => SYMBOLS[index]);
@@ -602,10 +629,7 @@ export function verifyChallenge(body, secret) {
     return { ok: false, status: 400, error: "Fourier checksum mismatch." };
   }
 
-  const token = createHash("sha256")
-    .update(`${id}:${answer}:${Date.now()}`)
-    .digest("hex");
-  return { ok: true, status: 200, token };
+  return { ok: true, status: 200, token: issueToken(secret) };
 }
 
 export function writeJson(response, status, body) {
@@ -616,6 +640,16 @@ export function handleChallengeRequest(request, response, secret = resolveSecret
   try {
     if (request.method === "GET" && request.url?.startsWith("/api/challenge")) {
       json(response, 200, createChallenge(secret));
+      return;
+    }
+
+    if (request.method === "POST" && request.url?.startsWith("/api/verify-token")) {
+      readNodeJson(request)
+        .then((body) => {
+          const result = verifyToken(body.token, secret);
+          json(response, result.ok ? 200 : 400, result);
+        })
+        .catch((error) => json(response, 400, { ok: false, error: error.message }));
       return;
     }
 

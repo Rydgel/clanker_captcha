@@ -18,7 +18,8 @@
   ],
   "scripts": {
     "demo": "node server.js",
-    "check": "node --check server.js && node --check src/clanker-captcha.js && node --check src/challenge-api.js && node --check src/worker.js",
+    "check": "node --check server.js && node --check src/clanker-captcha.js && node --check src/challenge-api.js && node --check src/worker.js && node --check test/challenge-api.test.js",
+    "test": "node --test",
     "start": "node server.js",
     "build": "rm -rf dist && mkdir -p dist/src && cp index.html dist/index.html && cp src/clanker-captcha.js dist/src/clanker-captcha.js && cp favicon.svg favicon.ico favicon-180.png dist/",
     "deploy": "npm run build && wrangler deploy",
